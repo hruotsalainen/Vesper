@@ -20,6 +20,7 @@
 # SOFTWARE.
 
 import os
+import tracemalloc
 import subprocess
 if not os.path.isfile("parPinger_wrapper.cpp"): # has not yet been compiled by cython
     print("Compiling required Cython libraries")
@@ -40,6 +41,8 @@ import datetime
 import matplotlib.pyplot as plt
 from scipy.stats import ks_2samp
 
+sys.settrace
+
 '''
 Run this script from the command line with -h to see instructions and arguments
 
@@ -48,7 +51,7 @@ Run this script from the command line with -h to see instructions and arguments
 '''
 
 class Monitor:
-    def __init__(self, profiles_path="vesper_profiles/", target_ips=[""], num_trainprobes=-1, probe_interval=-1, rt_plotting=False, window_size = 20, delete_cache=False):
+    def __init__(self, profiles_path="vesper_profiles/", target_ips=[""], num_trainprobes=-1, probe_interval=-1, transmission_interval=0.01, rt_plotting=False, window_size = 20, delete_cache=False):
         #Try to load last used configuration
         retrain = False
         self.initialized = False
@@ -142,7 +145,7 @@ class Monitor:
                         self.profiles[ip]._last_scores.set_size(self.config['window_size'])
                         self.profiles[ip]._last_labels.set_size(self.config['window_size'])
                     break
-            if not self.profiles.has_key(ip): #did not find profile for the given ip
+            if not self.profiles.__contains__(ip): #did not find profile for the given ip
                 self.profiles[ip] = Profile(ip, self.config['num_trainprobes'], score_window=self.config['window_size'])
 
         #save current config to disk
@@ -158,23 +161,32 @@ class Monitor:
         print("")
         self.start_time = time.time()
         self.prober = pp.PyParPinger()
+        self.transmission_interval = transmission_interval
         self.establish_ping_intervals()
+        print("Transmission frequencies established!")
         self.initialized = True
 
     def establish_ping_intervals(self):
         # Establish ping intervals for each IP
         print("Establishing ping transmission frequencies...")
         i=0
-        for ip, profile in self.profiles.iteritems():
+        for ip, profile in self.profiles.items():
             if profile.tx_interval == -1:
                 progressbar(len(self.profiles), i + 1, posttext="Sampling: " + profile.ip_addr)
-                self.prober.set_target_ip(profile.ip_addr)
-                profile.set_tx_interval(self.prober.get_interval())
+                self.prober.set_target_ip(bytes(profile.ip_addr,"ascii"))
+                
+                tx_interval = self.prober.get_interval()
+                print("DEBUG: tx_interval ", tx_interval)
+                profile.set_tx_interval(tx_interval)
                 if (profile.tx_interval > 0.001) or (profile.tx_interval < 0):
                     print(profile.ip_addr + " took too long to respond. Using 1Khz.")
                     print("Is "+profile.ip_addr+" inside your LAN?")
             else: #use saved value
+                print("DEBUG: tx_interval ", profile.tx_interval)
                 progressbar(len(self.profiles), i + 1, posttext="Loading: " + profile.ip_addr)
+            
+            profile.tx_interval = self.transmission_interval
+
             i+=1
 
     def save_obj(self, obj, name):
@@ -191,32 +203,51 @@ class Monitor:
         if self.config['rt_plotting']:
             self.plot_score_setup()
 
+        tracemalloc.start()
+
         self.start_time = time.time()
         probe_count = 0
         while True:
             # Random order IPs to be probed
             order = np.random.permutation(len(self.targetIPs))
             status = OrderedDict()
+
+           
+            
+            
             for indx in order:
                 #prep prober
                 targetIP = self.targetIPs[indx]
                 profile = self.profiles[targetIP]
-                self.prober.set_target_ip(targetIP)
+                
+                self.prober.set_target_ip(bytes(targetIP,"ascii"))
                 self.prober.set_ping_interval_sec(profile.tx_interval)
-
+                
                 #probe IP
+                print("debug in")
                 start = time.time()
+                
                 raw_probe = self.prober.probe()
                 stop = time.time()
                 probe_count += 1
 
+                print("debug out")
+                
+
                 #execute/train profile
+                
                 label, score = profile.process(raw_probe)
+                
+                #snapshot = tracemalloc.take_snapshot()
+
                 status[targetIP] = [label,score,profile.trainProgress(),profile.tx_interval,stop-start,profile.n_packets_lost_lastprobe]
 
                 time.sleep(self.config['probe_interval']/1000)
 
             # report
+
+            #top_stats = snapshot.statistics('lineno')
+
             self.report(status,probe_count)
 
             # plot
@@ -231,7 +262,7 @@ class Monitor:
 
     def saveProfiles(self):
         print("Saving Profiles...")
-        for ip, profile in self.profiles.iteritems():
+        for ip, profile in self.profiles.items():
             if profile._updated:
                 self.save_obj(profile, os.path.join(self.config['profiles_path'], ip))
 
@@ -240,7 +271,7 @@ class Monitor:
         table = PrettyTable()
         table.field_names = ['IP','Status','Score','Profile','Tx Freq [kH]','Probe Duration', 'Note']
         table.sortby = "IP"
-        for ip, status in status.iteritems():
+        for ip, status in status.items():
             label = status[0]
             score = np.round(status[1],2)
             trainProgress = status[2]
@@ -274,10 +305,12 @@ class Monitor:
         print("Vesper Status  --  Runtime: "+ "{:0>8}".format(str(datetime.timedelta(seconds=time.time()-self.start_time))))
         print(table)
         print("Sent "+"{:,}".format(probe_count)+" probes.")
+        
+
 
     def plot_score_setup(self):
         curTime_min = (time.time() - self.start_time) / 60
-        for ip, profile in self.profiles.iteritems():
+        for ip, profile in self.profiles.items():
             y = profile._last_labels.get_mean()
             self.axis.plot(curTime_min, y, label = ip)
         plt.legend(loc='upper left')
@@ -452,6 +485,7 @@ class Profile:
         mls_seq = np.array(raw_probe[2])
         good = rx_times != 0
         rtt = rx_times[good] - tx_times[good]
+        print(len(self.samples))
         average_sample = np.mean(np.vstack(self.samples),axis=0)
 
         # Feature 1: v_ie AVERAGE (not tested)
@@ -542,9 +576,10 @@ if __name__ == '__main__':
                     'Attacks in LANs\nYisroel Mirsky, Naor Kalbo, Yuval Elovici, Asaf Shabtai'
     parser.add_argument('-i',default=[""],nargs='*',help="Monitor the given IP address(es) <I> only. If an IP's profile exists on disk, it will be loaded and used.\nYou can also provide the path to a file containing a list of IPs, where each entry is on a seperate line.\nExample: python vesper.py -i 192.168.0.12\nExample: python vesper.py -i 192.168.0.10 192.168.0.42\nExample: python vesper.py -i ips.csv")
     parser.add_argument('-t',type=int,default=200,help="set the train size with the given number of probes <T>. If profiles already exist, the training will be shortened or expanded accordingly. a\nDefault is 200.\nExample: python vesper.py -i 192.168.0.12 -t 400")
+    parser.add_argument('-x', type=float,default=0.01,help="set the delay between two consecutive ping packets (Default: 0.01s = 10ms)")
     parser.add_argument('-p',action='store_true',help="Plot anomaly scores in realtime. \nExample: python vesper.py -p")
     parser.add_argument('-f',default="vesper_profiles/",help="load/save profiles from the given directory <F>. If is does not exist, it will be created. \nDefault path is ./vesper_profiles.")
-    parser.add_argument('-r',type=int,default=0,help="Sets the wait time <R> between each probe in miliseconds. \nDefault is 0.")
+    parser.add_argument('-r',type=int,default=0,help="Sets the wait time <R> between each probe in milliseconds. \nDefault is 0.")
     parser.add_argument('-w',type=int,default=10,help="Sets the sliding window size <W> used to average the anomaly scores. A larger window will provide fewer false alarms, but it will also increase the detection delay. \nDefault is 10.")
     parser.add_argument('--reset',action='store_true',help="Deletes the current configuration and all IP profiles stored on disk before initilizing vesper")
 
@@ -552,6 +587,6 @@ if __name__ == '__main__':
     args = parser.parse_known_args()[0]
 
     make_plot = True if (args.p is not None) else False
-    mon = Monitor(profiles_path=args.f, target_ips=args.i, num_trainprobes=args.t, probe_interval=args.r, rt_plotting=args.p, window_size=args.w, delete_cache = args.reset)
+    mon = Monitor(profiles_path=args.f, target_ips=args.i, num_trainprobes=args.t, probe_interval=args.r, transmission_interval = args.x, rt_plotting=args.p, window_size=args.w, delete_cache = args.reset)
     if mon.initialized: # False if there was an error or termination during initilization
         mon.run()
