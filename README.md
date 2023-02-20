@@ -1,4 +1,7 @@
 # Overview
+
+(Remark from H.R: This fork adds Python 3 compatibility to the original Vesper repository)
+
 In this repository you will find a man in the middle detection tool for local area networks. 
 
 This tool was presented at **Black Hat Asia 2019** ([here](https://www.blackhat.com/asia-19/briefings/schedule/index.html#see-like-a-bat-using-echo-analysis-to-detect-man-in-the-middle-attacks-in-lans-13713))
